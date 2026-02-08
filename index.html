@@ -2308,159 +2308,51 @@
     </style>
 
 </head>
-<!-- ========================= OPTIMIZED MODULES (Phase 3) ========================= -->
-<script>
-/**
- * EventManager - 统一事件管理，防止内存泄漏
- */
-class EventManager {
-    constructor() {
-        this.listeners = [];
-        this._destroyed = false;
-    }
-    add(target, event, handler, options) {
-        if (this._destroyed) return;
-        target.addEventListener(event, handler, options);
-        this.listeners.push({target, event, handler, options});
-    }
-    removeAll() {
-        for (const {target, event, handler} of this.listeners) {
-            try { target.removeEventListener(event, handler); } catch (e) {}
-        }
-        this.listeners = [];
-    }
-    destroy() {
-        this.removeAll();
-        this._destroyed = true;
-    }
-}
-window.TU = window.TU || {};
-window.TU.EventManager = EventManager;
-
-
-// Safe utilities for robust code
-// Only define simple safe helpers if more robust versions haven't been
-// provided by TU_Defensive. These fallbacks are intentionally minimal and
-// should not override the enhanced implementations (e.g. those bound to
-// BoundaryChecks or SafeAccess) defined earlier. If `window.safeGet` or
-// other helpers already exist, we leave them intact.
-if (typeof window.safeGet === 'undefined') {
-    window.safeGet = function(arr, index, defaultValue) {
-        if (!arr || index < 0 || index >= arr.length) return defaultValue;
-        return arr[index];
-    };
-}
-if (typeof window.safeGetProp === 'undefined') {
-    window.safeGetProp = function(obj, prop, defaultValue) {
-        if (!obj || typeof obj !== 'object') return defaultValue;
-        return obj[prop] !== undefined ? obj[prop] : defaultValue;
-    };
-}
-if (typeof window.safeJSONParse === 'undefined') {
-    window.safeJSONParse = function(str, defaultValue) {
-        try { return JSON.parse(str); } catch (e) { return defaultValue; };
-    };
-}
-if (typeof window.clamp === 'undefined') {
-    window.clamp = function(v, min, max) {
-        return Math.max(min, Math.min(max, v));
-    };
-}
-if (typeof window.lerp === 'undefined') {
-    window.lerp = function(a, b, t) {
-        return a + (b - a) * t;
-    };
-}
-
-// Ring buffer for input prediction
-class RingBuffer {
-    constructor(size) {
-        this.size = size;
-        this.buffer = new Array(size);
-        this.head = 0;
-        this.count = 0;
-    }
-    push(item) {
-        this.buffer[this.head] = item;
-        this.head = (this.head + 1) % this.size;
-        if (this.count < this.size) this.count++;
-    }
-    get(index) {
-        if (index < 0 || index >= this.count) return null;
-        const i = (this.head - this.count + index + this.size) % this.size;
-        return this.buffer[i];
-    }
-    clear() {
-        this.head = 0;
-        this.count = 0;
-    }
-}
-window.RingBuffer = RingBuffer;
-</script>
-
-<script>
-/**
- * ParticlePool - 粒子对象池，消除GC卡顿
- */
-class ParticlePool {
-    constructor(maxSize = 500) {
-        this.maxSize = maxSize;
-        this.pool = [];
-        this.active = [];
-        this._createPool();
-    }
-    _createPool() {
-        for (let i = 0; i < this.maxSize; i++) {
-            this.pool.push({x:0, y:0, vx:0, vy:0, life:0, maxLife:0, color:'', size:0, active:false});
-        }
-    }
-    spawn(x, y, vx, vy, color, size, life) {
-        let particle = this.pool.length > 0 ? this.pool.pop() : 
-                      (this.active.length > 0 ? this.active.shift() : null);
-        if (!particle) return null;
-        particle.x = x; particle.y = y; particle.vx = vx; particle.vy = vy;
-        particle.color = color; particle.size = size; particle.life = life;
-        particle.maxLife = life; particle.active = true;
-        this.active.push(particle);
-        return particle;
-    }
-    update(dt) {
-        for (let i = this.active.length - 1; i >= 0; i--) {
-            const p = this.active[i];
-            p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
-            if (p.life <= 0) {
-                p.active = false;
-                this.active.splice(i, 1);
-                this.pool.push(p);
-            }
-        }
-    }
-    render(ctx, camX, camY) {
-        for (const p of this.active) {
-            ctx.globalAlpha = p.life / p.maxLife;
-            ctx.fillStyle = p.color;
-            ctx.fillRect(p.x - camX, p.y - camY, p.size, p.size);
-        }
-        ctx.globalAlpha = 1;
-    }
-}
-window.TU.ParticlePool = ParticlePool;
-</script>
-
-<script>
-/**
- * Performance Monitor - 性能监控
- */
-window.PERF_MONITOR = {
-    frames: [], maxFrames: 60,
-    record(ft) { this.frames.push(ft); if (this.frames.length > this.maxFrames) this.frames.shift(); },
-    getAverageFPS() { return this.frames.length ? Math.round(1000 / (this.frames.reduce((a,b)=>a+b,0)/this.frames.length)) : 60; }
-};
-</script>
-<!-- ========================= END OPTIMIZED MODULES ========================= -->
-
 
 <body>
+    <!-- ═══════════════════ Optimized Modules (moved inside body) ═══════════════════ -->
+    <script>
+    // EventManager - unified event lifecycle management
+    class EventManager {
+        constructor() { this.listeners = []; this._destroyed = false; }
+        add(target, event, handler, options) {
+            if (this._destroyed) return;
+            target.addEventListener(event, handler, options);
+            this.listeners.push({ target, event, handler, options });
+        }
+        removeAll() {
+            for (const { target, event, handler } of this.listeners) {
+                try { target.removeEventListener(event, handler); } catch {}
+            }
+            this.listeners = [];
+        }
+        destroy() { this.removeAll(); this._destroyed = true; }
+    }
+    // RingBuffer - for input prediction
+    class RingBuffer {
+        constructor(size) { this.size = size; this.buffer = new Array(size); this.head = 0; this.count = 0; }
+        push(item) { this.buffer[this.head] = item; this.head = (this.head + 1) % this.size; if (this.count < this.size) this.count++; }
+        get(index) { if (index < 0 || index >= this.count) return null; return this.buffer[(this.head - this.count + index + this.size) % this.size]; }
+        clear() { this.head = 0; this.count = 0; }
+    }
+    // ParticlePool - GC-free particle lifecycle
+    class ParticlePool {
+        constructor(maxSize = 500) { this.maxSize = maxSize; this.pool = []; this.active = []; for (let i = 0; i < maxSize; i++) this.pool.push({x:0,y:0,vx:0,vy:0,life:0,maxLife:0,color:'',size:0,active:false}); }
+        spawn(x, y, vx, vy, color, size, life) {
+            let p = this.pool.length > 0 ? this.pool.pop() : (this.active.length > 0 ? this.active.shift() : null);
+            if (!p) return null;
+            p.x = x; p.y = y; p.vx = vx; p.vy = vy; p.color = color; p.size = size; p.life = life; p.maxLife = life; p.active = true;
+            this.active.push(p); return p;
+        }
+        update(dt) { for (let i = this.active.length - 1; i >= 0; i--) { const p = this.active[i]; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; if (p.life <= 0) { p.active = false; this.active.splice(i, 1); this.pool.push(p); } } }
+        render(ctx, camX, camY) { for (const p of this.active) { ctx.globalAlpha = p.life / p.maxLife; ctx.fillStyle = p.color; ctx.fillRect(p.x - camX, p.y - camY, p.size, p.size); } ctx.globalAlpha = 1; }
+    }
+    // Exports (safe helpers like clamp/lerp/safeGet already defined in TU Core Utilities above)
+    window.TU = window.TU || {};
+    Object.assign(window.TU, { EventManager, ParticlePool });
+    window.RingBuffer = RingBuffer;
+    window.PERF_MONITOR = PerfMonitor; // Alias to consolidated PerfMonitor
+    </script>
     <canvas id="game"></canvas>
     <!-- 环境粒子 -->
     <div id="ambient-particles"></div>
