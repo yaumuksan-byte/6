@@ -2139,279 +2139,56 @@
 
 <script>
 // ═══════════════════════════════════════════════════════════════════════════════
-// 防御性基础设施 - 统一模块 (合并自 17 个重复模块)
-// 版本: 2.0.0 (Consolidated)
+// TU Core Utilities - Single lightweight module
+// Replaces: TU_Defensive v1-v4, TU_SAFE, BoundaryChecks, SafeMath, etc.
 // ═══════════════════════════════════════════════════════════════════════════════
-
 (function(global) {
     'use strict';
 
-    // =============================================================================
-    // 1. 常量定义
-    // =============================================================================
-
-    const WorkerState = Object.freeze({
-        IDLE: 'idle',
-        INITIALIZING: 'initializing',
-        READY: 'ready',
-        GENERATING: 'generating',
-        RENDERING: 'rendering',
-        ERROR: 'error',
-        TERMINATED: 'terminated'
-    });
-
-    const ErrorSeverity = Object.freeze({
-        DEBUG: 'debug', INFO: 'info', WARN: 'warn', ERROR: 'error', FATAL: 'fatal'
-    });
-
-    const EventTypes = Object.freeze({
-        TILE_CHANGED: 'tile:changed',
-        LIGHT_UPDATED: 'light:updated',
-        PLAYER_MOVED: 'player:moved',
-        WEATHER_CHANGED: 'weather:changed',
-        WORLD_LOADED: 'world:loaded',
-        WORKER_ERROR: 'worker:error',
-        RENDER_FRAME: 'render:frame'
-    });
-
-    // =============================================================================
-    // 2. 全局错误计数与熔断
-    // =============================================================================
-
-    global.__TU_ERROR_COUNT__ = 0;
-    global.__TU_MAX_ERRORS__ = 100;
-    global.__TU_FATAL_ERROR__ = false;
+    // ── Error tracking (lightweight circuit breaker) ──
+    let _errorCount = 0;
+    const MAX_ERRORS = 100;
 
     global.onerror = function(msg, url, line, col, error) {
-        global.__TU_ERROR_COUNT__++;
-        console.error(`[Global Error #${global.__TU_ERROR_COUNT__}]`, { msg, url, line, col, error });
-        if (global.__TU_ERROR_COUNT__ > global.__TU_MAX_ERRORS__) {
-            global.__TU_FATAL_ERROR__ = true;
-            console.error('[CRITICAL] 错误数量超过阈值，系统进入安全模式');
-            if (global.game && typeof global.game.pause === 'function') {
-                global.game.pause();
-            }
+        _errorCount++;
+        if (_errorCount <= 10) console.error('[Error]', msg, { line, col });
+        if (_errorCount > MAX_ERRORS && global.game && typeof global.game.pause === 'function') {
+            global.game.pause();
         }
         return false;
     };
-
-    global.addEventListener('unhandledrejection', function(event) {
-        global.__TU_ERROR_COUNT__++;
-        console.error(`[Unhandled Rejection #${global.__TU_ERROR_COUNT__}]`, event.reason);
-        event.preventDefault();
+    global.addEventListener('unhandledrejection', (e) => {
+        _errorCount++;
+        if (_errorCount <= 10) console.error('[Unhandled Rejection]', e.reason);
+        e.preventDefault();
     });
 
-    // =============================================================================
-    // 3. 类型守卫系统 (TypeGuards)
-    // =============================================================================
+    // ── Worker states ──
+    const WorkerState = Object.freeze({
+        IDLE: 'idle', INITIALIZING: 'initializing', READY: 'ready',
+        GENERATING: 'generating', RENDERING: 'rendering',
+        ERROR: 'error', TERMINATED: 'terminated'
+    });
 
-    const TypeGuards = {
-        isValidNumber(val) { return typeof val === 'number' && !isNaN(val) && isFinite(val); },
-        isValidInteger(val) { return Number.isInteger(val); },
-        isValidPositiveInteger(val) { return Number.isInteger(val) && val >= 0; },
-        isValidString(val, maxLength = 10000) { return typeof val === 'string' && val.length <= maxLength; },
-        isValidArray(val) { return Array.isArray(val); },
-        isValidNonEmptyArray(val) { return Array.isArray(val) && val.length > 0; },
-        isValidFunction(val) { return typeof val === 'function'; },
-        isValidObject(val) { return val !== null && typeof val === 'object' && !Array.isArray(val); },
-        isValidCanvas(canvas) { return canvas && typeof canvas.getContext === 'function'; },
-        isValidContext(ctx) { return ctx && typeof ctx.drawImage === 'function'; },
-        isValidCoordinate(x, y, w, h) {
-            return this.isValidInteger(x) && this.isValidInteger(y) &&
-                   this.isValidInteger(w) && this.isValidInteger(h) &&
-                   x >= 0 && x < w && y >= 0 && y < h;
-        },
-        isValidIndex(index, arr) {
-            return this.isValidInteger(index) && this.isValidArray(arr) && index >= 0 && index < arr.length;
-        },
-        isValidTileId(id, maxId = 256) { return this.isValidInteger(id) && id >= 0 && id < maxId; },
-        isGameInstance(g) {
-            return g && typeof g === 'object' && typeof g.loop === 'function';
-        }
-    };
+    // ── Math helpers ──
+    const clamp = (v, min, max) => v < min ? min : v > max ? max : v;
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const toInt = (v) => { const n = Number(v); return Number.isFinite(n) ? n | 0 : 0; };
 
-    // =============================================================================
-    // 4. 断言系统 (Assert)
-    // =============================================================================
-
-    const Assert = {
-        enabled: true,
-        fail(message, context = {}) {
-            if (this.enabled) {
-                console.error('[ASSERT FAILED]', message, context);
-                global.__TU_ERROR_COUNT__++;
-            }
-        },
-        ok(condition, message) { if (!condition) this.fail(message); return condition; },
-        isTrue(condition, message) { return this.ok(condition, message); },
-        isNumber(val, name = 'value') { return this.ok(TypeGuards.isValidNumber(val), name + ' must be a valid number'); },
-        isInteger(val, name = 'value') { return this.ok(TypeGuards.isValidInteger(val), name + ' must be an integer'); },
-        inRange(val, min, max, name = 'value') {
-            return this.ok(TypeGuards.isValidNumber(val) && val >= min && val <= max,
-                `${name} must be in range [${min}, ${max}], got ${val}`);
-        },
-        isValidIndex(index, arr, name = 'index') {
-            return this.ok(TypeGuards.isValidIndex(index, arr),
-                `${name} out of bounds: ${index}, length=${arr ? arr.length : 'null'}`);
-        }
-    };
-
-    // =============================================================================
-    // 5. 安全数学运算 (SafeMath)
-    // =============================================================================
-
-    const SafeMath = {
-        clamp(val, min, max) {
-            if (!TypeGuards.isValidNumber(val)) return min;
-            return val < min ? min : val > max ? max : val;
-        },
-        clampInt(val, min, max) {
-            if (!TypeGuards.isValidInteger(val)) return min;
-            return val < min ? min : val > max ? max : val;
-        },
-        divFloor(n, d) { return d === 0 ? 0 : Math.floor(n / d); },
-        toIndex(x, y, width) { return y * width + x; },
-        toChunkCoord(coord, chunkSize) {
-            return coord < 0 ? Math.floor(coord / chunkSize) : (coord / chunkSize) | 0;
-        },
-        toInt32(val) {
-            const n = Number(val);
-            return Number.isFinite(n) ? n | 0 : 0;
-        }
-    };
-
-    // =============================================================================
-    // 6. 边界检查 (BoundaryChecks)
-    // =============================================================================
-
-    const BoundaryChecks = {
-        clamp(val, min, max) { return SafeMath.clamp(val, min, max); },
-        clampInt(val, min, max) { return SafeMath.clampInt(val, min, max); },
-        safeArrayAccess(arr, index, defaultValue = undefined) {
-            if (!TypeGuards.isValidArray(arr)) return defaultValue;
-            if (!TypeGuards.isValidInteger(index) || index < 0 || index >= arr.length) return defaultValue;
-            return arr[index];
-        },
-        safe2DArrayAccess(arr, x, y, defaultValue = undefined) {
-            if (!TypeGuards.isValidArray(arr)) return defaultValue;
-            const col = arr[x];
-            if (!col || !TypeGuards.isValidArray(col)) return defaultValue;
-            if (!TypeGuards.isValidInteger(y) || y < 0 || y >= col.length) return defaultValue;
-            return col[y];
-        },
-        safeDivide(a, b, defaultValue = 0) {
-            if (!TypeGuards.isValidNumber(b) || b === 0) return defaultValue;
-            return a / b;
-        },
-        safeModulo(a, b, defaultValue = 0) {
-            if (!TypeGuards.isValidNumber(b) || b === 0) return defaultValue;
-            return a % b;
-        }
-    };
-
-    // =============================================================================
-    // 7. 输入验证 (InputValidator)
-    // =============================================================================
-
-    const InputValidator = {
-        validateCoordinate(x, y, w, h) {
-            if (!TypeGuards.isValidCoordinate(x, y, w, h)) {
-                return { valid: false, x: SafeMath.clampInt(x | 0, 0, w - 1), y: SafeMath.clampInt(y | 0, 0, h - 1) };
-            }
-            return { valid: true, x, y };
-        },
-        sanitizeString(str) {
-            if (!TypeGuards.isValidString(str)) return '';
-            return str.replace(/[<>&"']/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' })[c]);
-        },
-        sanitizeNumber(num, defaultVal = 0) {
-            if (!TypeGuards.isValidNumber(num)) return defaultVal;
-            return num;
-        },
-        validateTileId(id, maxId = 256) {
-            if (!TypeGuards.isValidTileId(id, maxId)) return { valid: false, id: SafeMath.clampInt(id | 0, 0, maxId - 1) };
-            return { valid: true, id };
-        },
-        validateLightLevel(val) {
-            if (!TypeGuards.isValidNumber(val) || val < 0 || val > 1) return { valid: false, val: SafeMath.clamp(val || 0, 0, 1) };
-            return { valid: true, val };
-        }
-    };
-
-    // =============================================================================
-    // 8. 错误报告 (ErrorReporter) - 含速率限制
-    // =============================================================================
-
-    const ErrorReporter = {
-        _errors: [],
-        _maxErrors: 50,
-        _lastReport: 0,
-        _minInterval: 100,
-
-        report(error, context = {}) {
-            const now = Date.now();
-            if (now - this._lastReport < this._minInterval) return;
-            if (this._errors.length >= this._maxErrors) return;
-            this._lastReport = now;
-            const entry = {
-                message: error?.message || String(error),
-                stack: error?.stack,
-                context,
-                timestamp: now
-            };
-            this._errors.push(entry);
-            console.error('[ErrorReporter]', entry.message, context);
-        },
-        getErrors() { return [...this._errors]; },
-        clear() { this._errors.length = 0; }
-    };
-
-    // =============================================================================
-    // 9. 资源管理 (ResourceManager)
-    // =============================================================================
-
-    const ResourceManager = {
-        _intervals: [],
-        _timeouts: [],
-        _rafs: [],
-
-        registerInterval(id) { this._intervals.push(id); return id; },
-        registerTimeout(id) { this._timeouts.push(id); return id; },
-        registerRAF(id) { this._rafs.push(id); return id; },
-        disposeAll() {
-            this._intervals.forEach(id => clearInterval(id));
-            this._timeouts.forEach(id => clearTimeout(id));
-            this._rafs.forEach(id => cancelAnimationFrame(id));
-            this._intervals.length = 0;
-            this._timeouts.length = 0;
-            this._rafs.length = 0;
-        }
-    };
-
-    // =============================================================================
-    // 10. 安全 JSON (SafeJSON)
-    // =============================================================================
-
+    // ── Safe JSON ──
     const SafeJSON = {
-        parse(str, defaultValue = null) {
-            try { return JSON.parse(str); } catch (e) { return defaultValue; }
-        },
-        stringify(obj, defaultValue = '{}') {
-            try { return JSON.stringify(obj); } catch (e) { return defaultValue; }
-        }
+        parse(str, def = null) { try { return JSON.parse(str); } catch { return def; } },
+        stringify(obj, def = '{}') { try { return JSON.stringify(obj); } catch { return def; } }
     };
 
-    // =============================================================================
-    // 11. 世界访问 (WorldAccess)
-    // =============================================================================
-
+    // ── World data access (bounds-checked) ──
     const WorldAccess = {
-        getTile(world, x, y, defaultValue = 0) {
-            if (!world || !world.tiles) return defaultValue;
+        getTile(world, x, y, def = 0) {
+            if (!world || !world.tiles) return def;
             x = x | 0; y = y | 0;
-            if (x < 0 || x >= world.w || y < 0 || y >= world.h) return defaultValue;
+            if (x < 0 || x >= world.w || y < 0 || y >= world.h) return def;
             const col = world.tiles[x];
-            return col ? (col[y] !== undefined ? col[y] : defaultValue) : defaultValue;
+            return col ? (col[y] !== undefined ? col[y] : def) : def;
         },
         setTile(world, x, y, value) {
             if (!world || !world.tiles) return false;
@@ -2422,12 +2199,12 @@
             col[y] = value;
             return true;
         },
-        getLight(world, x, y, defaultValue = 0) {
-            if (!world || !world.light) return defaultValue;
+        getLight(world, x, y, def = 0) {
+            if (!world || !world.light) return def;
             x = x | 0; y = y | 0;
-            if (x < 0 || x >= world.w || y < 0 || y >= world.h) return defaultValue;
+            if (x < 0 || x >= world.w || y < 0 || y >= world.h) return def;
             const col = world.light[x];
-            return col ? (col[y] !== undefined ? col[y] : defaultValue) : defaultValue;
+            return col ? (col[y] !== undefined ? col[y] : def) : def;
         },
         setLight(world, x, y, value) {
             if (!world || !world.light) return false;
@@ -2440,119 +2217,89 @@
         }
     };
 
-    // =============================================================================
-    // 12. 安全访问包装器 (SafeAccess)
-    // =============================================================================
-
-    const SafeAccess = {
-        get(obj, path, defaultValue = null) {
-            if (!obj || typeof obj !== 'object') return defaultValue;
-            const keys = path.split('.');
-            let current = obj;
-            for (const key of keys) {
-                if (current === null || current === undefined) return defaultValue;
-                current = current[key];
-            }
-            return current !== undefined ? current : defaultValue;
+    // ── Error reporter (rate-limited) ──
+    const ErrorReporter = {
+        _errors: [], _lastReport: 0,
+        report(error, context = {}) {
+            const now = Date.now();
+            if (now - this._lastReport < 100 || this._errors.length >= 50) return;
+            this._lastReport = now;
+            this._errors.push({ message: error?.message || String(error), context, timestamp: now });
+            console.error('[TU]', error?.message || error, context);
         },
-        set(obj, path, value) {
-            if (!obj || typeof obj !== 'object') return false;
-            const keys = path.split('.');
-            let current = obj;
-            for (let i = 0; i < keys.length - 1; i++) {
-                const key = keys[i];
-                if (!(key in current) || typeof current[key] !== 'object') current[key] = {};
-                current = current[key];
-            }
-            current[keys[keys.length - 1]] = value;
-            return true;
+        getErrors() { return [...this._errors]; },
+        clear() { this._errors.length = 0; }
+    };
+
+    // ── Resource cleanup tracker ──
+    const ResourceManager = {
+        _intervals: [], _timeouts: [], _rafs: [],
+        registerInterval(id) { this._intervals.push(id); return id; },
+        registerTimeout(id) { this._timeouts.push(id); return id; },
+        registerRAF(id) { this._rafs.push(id); return id; },
+        disposeAll() {
+            this._intervals.forEach(id => clearInterval(id));
+            this._timeouts.forEach(id => clearTimeout(id));
+            this._rafs.forEach(id => cancelAnimationFrame(id));
+            this._intervals.length = this._timeouts.length = this._rafs.length = 0;
         }
     };
 
-    // =============================================================================
-    // 13. 空对象模式 (NullObjects)
-    // =============================================================================
-
-    const NullObjects = Object.freeze({
-        item: Object.freeze({ id: 0, name: '', count: 0, durability: 0, maxDurability: 0, isEmpty: true }),
-        world: Object.freeze({ w: 0, h: 0, tiles: [], light: [], biomes: [] }),
-        player: Object.freeze({ x: 0, y: 0, vx: 0, vy: 0, health: 100, mana: 50, inventory: [] })
-    });
-
-    // =============================================================================
-    // 14. 导出到全局
-    // =============================================================================
-
-    const TU_Defensive = {
-        WorkerState, ErrorSeverity, EventTypes,
-        TypeGuards, Assert, SafeMath, BoundaryChecks,
-        InputValidator, ErrorReporter, ResourceManager,
-        SafeJSON, WorldAccess, SafeAccess, NullObjects
-    };
-
+    // ── Export single TU_Defensive namespace (backward-compatible) ──
+    const TU_Defensive = { WorkerState, SafeJSON, WorldAccess, ErrorReporter, ResourceManager };
     global.TU_Defensive = TU_Defensive;
     global.TU_DEFENSIVE = TU_Defensive;
 
-    // 全局便捷函数（保持向后兼容）
-    if (!global.safeGet) global.safeGet = function(arr, idx, def) { return BoundaryChecks.safeArrayAccess(arr, idx, def); };
-    if (!global.safeSet) global.safeSet = function(arr, idx, val) { if (arr && idx >= 0 && idx < arr.length) arr[idx] = val; };
-    if (!global.safe2DArrayAccess) global.safe2DArrayAccess = BoundaryChecks.safe2DArrayAccess;
-    if (!global.safeDivide) global.safeDivide = BoundaryChecks.safeDivide;
-    if (!global.safeModulo) global.safeModulo = BoundaryChecks.safeModulo;
-    if (!global.safeJSONParse) global.safeJSONParse = SafeJSON.parse;
-    if (!global.safeJSONStringify) global.safeJSONStringify = SafeJSON.stringify;
-    if (!global.safeGetProp) global.safeGetProp = function(obj, prop, def) { return (obj && typeof obj === 'object') ? (obj[prop] !== undefined ? obj[prop] : def) : def; };
-    if (!global.clamp) global.clamp = function(v, min, max) { return Math.max(min, Math.min(max, v)); };
-    if (!global.lerp) global.lerp = function(a, b, t) { return a + (b - a) * t; };
-    if (!global.worldGetTile) global.worldGetTile = function(w, x, y, d) { return WorldAccess.getTile(w, x, y, d); };
-    if (!global.worldSetTile) global.worldSetTile = function(w, x, y, v) { return WorldAccess.setTile(w, x, y, v); };
-    if (!global.worldGetLight) global.worldGetLight = function(w, x, y, d) { return WorldAccess.getLight(w, x, y, d); };
-    if (!global.worldSetLight) global.worldSetLight = function(w, x, y, v) { return WorldAccess.setLight(w, x, y, v); };
-
-    // TU_SAFE 兼容 (供启动代码使用)
-    global.TU_SAFE = {
-        reportError(error, context) { ErrorReporter.report(error, context); }
+    // Global convenience functions (used throughout codebase)
+    global.clamp = clamp;
+    global.lerp = lerp;
+    global.safeGet = (arr, idx, def) => (Array.isArray(arr) && idx >= 0 && idx < arr.length) ? arr[idx] : def;
+    global.safeSet = (arr, idx, val) => { if (arr && idx >= 0 && idx < arr.length) arr[idx] = val; };
+    global.safe2DArrayAccess = (arr, x, y, def) => {
+        if (!Array.isArray(arr)) return def;
+        const col = arr[x];
+        return (col && Array.isArray(col) && y >= 0 && y < col.length) ? col[y] : def;
     };
+    global.safeDivide = (a, b, def = 0) => (!Number.isFinite(b) || b === 0) ? def : a / b;
+    global.safeModulo = (a, b, def = 0) => (!Number.isFinite(b) || b === 0) ? def : a % b;
+    global.safeJSONParse = SafeJSON.parse;
+    global.safeJSONStringify = SafeJSON.stringify;
+    global.safeGetProp = (obj, prop, def) => (obj && typeof obj === 'object') ? (obj[prop] !== undefined ? obj[prop] : def) : def;
+    global.worldGetTile = (w, x, y, d) => WorldAccess.getTile(w, x, y, d);
+    global.worldSetTile = (w, x, y, v) => WorldAccess.setTile(w, x, y, v);
+    global.worldGetLight = (w, x, y, d) => WorldAccess.getLight(w, x, y, d);
+    global.worldSetLight = (w, x, y, v) => WorldAccess.setLight(w, x, y, v);
 
-    console.log('[TU_Defensive] 统一防御性模块已加载 v2.0 (consolidated)');
+    // TU_SAFE compat
+    global.TU_SAFE = { reportError(err, ctx) { ErrorReporter.report(err, ctx); } };
 
 })(typeof window !== 'undefined' ? window : globalThis);
 
-// 加载界面卡死保护
+// Loading screen stuck protection
 (function() {
     'use strict';
-    const LOADING_TIMEOUT = 30000;
-    const LOADING_CHECK_INTERVAL = 1000;
-    let loadingStartTime = Date.now();
-    let lastProgress = 0;
-    let stuckCount = 0;
-
-    const checkLoading = () => {
-        const loadingEl = document.getElementById('loading');
-        if (!loadingEl || loadingEl.style.display === 'none') return;
-        const progressEl = document.getElementById('load-progress');
-        const currentProgress = progressEl ? parseInt(progressEl.style.width || '0') : 0;
-        if (currentProgress === lastProgress) { stuckCount++; }
-        else { stuckCount = 0; lastProgress = currentProgress; }
-        const elapsed = Date.now() - loadingStartTime;
-        if (elapsed > LOADING_TIMEOUT || stuckCount > 10) {
-            console.error('[Loading] Timeout or stuck detected');
-            const statusEl = document.getElementById('load-status');
-            if (statusEl) statusEl.textContent = '加载遇到问题，请刷新页面重试';
-            const retryBtn = document.createElement('button');
-            retryBtn.textContent = '重试';
-            retryBtn.style.cssText = 'margin-top: 20px; padding: 10px 20px; font-size: 16px; cursor: pointer;';
-            retryBtn.onclick = () => window.location.reload();
-            const content = document.querySelector('.loading-content');
-            if (content && !document.getElementById('loading-retry-btn')) {
-                retryBtn.id = 'loading-retry-btn';
-                content.appendChild(retryBtn);
+    let lastProgress = 0, stuckCount = 0;
+    const check = () => {
+        const el = document.getElementById('loading');
+        if (!el || el.style.display === 'none') return;
+        const p = document.getElementById('load-progress');
+        const cur = p ? parseInt(p.style.width || '0') : 0;
+        if (cur === lastProgress) stuckCount++; else { stuckCount = 0; lastProgress = cur; }
+        if (stuckCount > 10) {
+            const s = document.getElementById('load-status');
+            if (s) s.textContent = '加载遇到问题，请刷新页面重试';
+            if (!document.getElementById('loading-retry-btn')) {
+                const btn = document.createElement('button');
+                btn.id = 'loading-retry-btn';
+                btn.textContent = '重试';
+                btn.style.cssText = 'margin-top:20px;padding:10px 20px;font-size:16px;cursor:pointer';
+                btn.onclick = () => location.reload();
+                const c = document.querySelector('.loading-content');
+                if (c) c.appendChild(btn);
             }
-        } else {
-            setTimeout(checkLoading, LOADING_CHECK_INTERVAL);
-        }
+        } else setTimeout(check, 1000);
     };
-    setTimeout(checkLoading, LOADING_CHECK_INTERVAL);
+    setTimeout(check, 1000);
 })();
 </script>
     <style>
@@ -3164,724 +2911,171 @@ window.PERF_MONITOR = {
 
     <!-- ========================= MODULE: core/tu_namespace ========================= -->
     <script>
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // Core Utilities - Consolidated pools, throttle, and performance monitoring
+        // (Replaces: ObjectPool, VecPool, ArrayPool, MemoryManager, PerfMonitor,
+        //  TextureCache, BatchRenderer, LazyLoader, EventUtils)
+        // ═══════════════════════════════════════════════════════════════════════════════
 
-        // ╔═══════════════════════════════════════════════════════════════════════════════╗
-        // ║                    TERRARIA ULTRA - 全面深度优化 v3                           ║
-        // ║                    性能优化 & 代码质量提升 & 新功能                            ║
-        // ╚═══════════════════════════════════════════════════════════════════════════════╝
-
-
-        // ═══════════════════ 对象池优化 (防御性重构版) ═══════════════════
+        // ── Lightweight Object Pool ──
         const ObjectPool = {
             _pools: new Map(),
-            _typeCount: 0,
-            MAX_TYPES: 100,
-            MAX_POOL_SIZE: 500,
-            
             get(type, factory) {
-                // 验证类型参数
-                if (typeof type !== 'string' || type.length === 0) {
-                    console.warn('[ObjectPool] Invalid type parameter');
-                    return factory();
-                }
-                
                 let pool = this._pools.get(type);
-                if (!pool) {
-                    // 配额限制检查
-                    if (this._typeCount >= this.MAX_TYPES) {
-                        console.warn('[ObjectPool] Type quota exceeded');
-                        return factory();
-                    }
-                    pool = [];
-                    this._pools.set(type, pool);
-                    this._typeCount++;
-                }
-                
-                if (pool.length > 0) {
-                    const obj = pool.pop();
-                    // 清理对象引用以防止内存泄漏
-                    if (obj && typeof obj === 'object') {
-                        Object.keys(obj).forEach(key => { obj[key] = null; });
-                    }
-                    return obj;
-                }
+                if (pool && pool.length > 0) return pool.pop();
                 return factory();
             },
-            
             release(type, obj) {
-                // 验证参数
-                if (!obj || typeof obj !== 'object') {
-                    console.warn('[ObjectPool] Invalid object to release');
-                    return;
-                }
-                
-                if (typeof type !== 'string') {
-                    console.warn('[ObjectPool] Invalid type for release');
-                    return;
-                }
-                
+                if (!obj) return;
                 let pool = this._pools.get(type);
-                if (!pool) {
-                    if (this._typeCount >= this.MAX_TYPES) return;
-                    pool = [];
-                    this._pools.set(type, pool);
-                    this._typeCount++;
-                }
-                
-                if (pool.length < this.MAX_POOL_SIZE) {
-                    pool.push(obj);
-                }
+                if (!pool) { pool = []; this._pools.set(type, pool); }
+                if (pool.length < 500) pool.push(obj);
             },
-            
-            clear(type) {
-                if (type) {
-                    if (this._pools.has(type)) {
-                        this._pools.delete(type);
-                        this._typeCount = Math.max(0, this._typeCount - 1);
-                    }
-                } else {
-                    this._pools.clear();
-                    this._typeCount = 0;
-                }
-            },
-            
-            getStats() {
-                let totalObjects = 0;
-                this._pools.forEach(pool => { totalObjects += pool.length; });
-                return {
-                    typeCount: this._typeCount,
-                    totalObjects: totalObjects,
-                    maxTypes: this.MAX_TYPES,
-                    maxPoolSize: this.MAX_POOL_SIZE
-                };
-            }
+            clear(type) { if (type) this._pools.delete(type); else this._pools.clear(); }
         };
         window.ObjectPool = ObjectPool;
 
-        // ═══════════════════ 向量池优化 (防御性重构版) ═══════════════════
+    <script>
+        // ── Vector Pool (lean) ──
         const VecPool = {
             _pool: [],
-            _maxSize: 200,
-            _releasedCount: 0,
-            _acquiredCount: 0,
-            
             get(x = 0, y = 0) {
-                // 验证坐标参数
-                const safeX = Number.isFinite(x) ? x : 0;
-                const safeY = Number.isFinite(y) ? y : 0;
-                
-                this._acquiredCount++;
-                
-                if (this._pool.length > 0) {
-                    const v = this._pool.pop();
-                    // 验证返回的对象
-                    if (v && typeof v === 'object') {
-                        v.x = safeX; 
-                        v.y = safeY;
-                        return v;
-                    }
-                }
-                return { x: safeX, y: safeY };
+                if (this._pool.length > 0) { const v = this._pool.pop(); v.x = x; v.y = y; return v; }
+                return { x, y };
             },
-            
-            release(v) {
-                // 严格验证
-                if (!v || typeof v !== 'object') {
-                    console.warn('[VecPool] Attempted to release non-object');
-                    return;
-                }
-                
-                // 防止重复释放同一对象
-                if (this._pool.includes(v)) {
-                    console.warn('[VecPool] Attempted double-release');
-                    return;
-                }
-                
-                this._releasedCount++;
-                
-                if (this._pool.length < this._maxSize) {
-                    // 清理引用
-                    v.x = 0;
-                    v.y = 0;
-                    this._pool.push(v);
-                }
-            },
-            
-            getStats() {
-                return {
-                    poolSize: this._pool.length,
-                    maxSize: this._maxSize,
-                    acquired: this._acquiredCount,
-                    released: this._releasedCount
-                };
-            },
-            
-            clear() {
-                this._pool = [];
-                this._acquiredCount = 0;
-                this._releasedCount = 0;
-            }
+            release(v) { if (v && this._pool.length < 200) { v.x = 0; v.y = 0; this._pool.push(v); } },
+            clear() { this._pool.length = 0; }
         };
         window.VecPool = VecPool;
 
-        // ═══════════════════ 数组池优化 (防御性重构版) ═══════════════════
+        // ── Array Pool (lean) ──
         const ArrayPool = {
             _pools: new Map(),
-            _typeCount: 0,
-            MAX_TYPES: 10,
-            MAX_POOL_SIZE: 50,
-            
             get(size = 0) {
-                // 验证size参数
-                const safeSize = Number.isInteger(size) && size >= 0 ? size : 0;
-                const key = safeSize <= 16 ? 16 : safeSize <= 64 ? 64 : safeSize <= 256 ? 256 : 1024;
-                
-                let pool = this._pools.get(key);
-                if (!pool) {
-                    if (this._typeCount >= this.MAX_TYPES) {
-                        console.warn('[ArrayPool] Type quota exceeded');
-                        return new Array(safeSize);
-                    }
-                    pool = [];
-                    this._pools.set(key, pool);
-                    this._typeCount++;
-                }
-                
-                if (pool.length > 0) {
-                    const arr = pool.pop();
-                    if (Array.isArray(arr)) {
-                        arr.length = 0;
-                        return arr;
-                    }
-                }
-                return new Array(safeSize);
+                const key = size <= 16 ? 16 : size <= 64 ? 64 : size <= 256 ? 256 : 1024;
+                const pool = this._pools.get(key);
+                if (pool && pool.length > 0) { const a = pool.pop(); a.length = 0; return a; }
+                return new Array(size);
             },
-            
             release(arr) {
-                // 严格验证
-                if (!Array.isArray(arr)) {
-                    console.warn('[ArrayPool] Attempted to release non-array');
-                    return;
-                }
-                
-                // 防止重复释放
-                const len = arr.length;
-                const key = len <= 16 ? 16 : len <= 64 ? 64 : len <= 256 ? 256 : 1024;
+                if (!Array.isArray(arr)) return;
+                const key = arr.length <= 16 ? 16 : arr.length <= 64 ? 64 : arr.length <= 256 ? 256 : 1024;
                 let pool = this._pools.get(key);
-                
-                if (!pool) {
-                    if (this._typeCount >= this.MAX_TYPES) return;
-                    pool = [];
-                    this._pools.set(key, pool);
-                    this._typeCount++;
-                }
-                
-                if (pool.length < this.MAX_POOL_SIZE && !pool.includes(arr)) {
-                    // 深度清理数组元素
-                    for (let i = 0; i < arr.length; i++) {
-                        arr[i] = null;
-                    }
-                    arr.length = 0;
-                    pool.push(arr);
-                }
+                if (!pool) { pool = []; this._pools.set(key, pool); }
+                if (pool.length < 50) { arr.length = 0; pool.push(arr); }
             },
-            
-            getStats() {
-                let totalArrays = 0;
-                this._pools.forEach(pool => { totalArrays += pool.length; });
-                return {
-                    typeCount: this._typeCount,
-                    totalArrays: totalArrays,
-                    maxTypes: this.MAX_TYPES,
-                    maxPoolSize: this.MAX_POOL_SIZE
-                };
-            },
-            
-            clear() {
-                this._pools.clear();
-                this._typeCount = 0;
-            }
+            clear() { this._pools.clear(); }
         };
         window.ArrayPool = ArrayPool;
 
-        // ═══════════════════ 内存优化工具 (防御性重构版) ═══════════════════
+        // ── Memory Manager (lean) ──
         const MemoryManager = {
             _lastCleanup: 0,
-            _cleanupInterval: 30000, // 30秒清理一次
-            _cleanupCount: 0,
-            _maxCleanups: 10000, // 防止无限清理
-            
             tick(now) {
-                // 验证时间戳
-                if (!Number.isFinite(now)) {
-                    console.warn('[MemoryManager] Invalid timestamp');
-                    return;
-                }
-                
-                // 防止清理次数过多
-                if (this._cleanupCount >= this._maxCleanups) {
-                    return;
-                }
-                
-                if (now - this._lastCleanup > this._cleanupInterval) {
-                    this._lastCleanup = now;
-                    this._cleanupCount++;
-                    this.cleanup();
-                }
-            },
-
-            cleanup() {
-                try {
-                    // 清理对象池中过多的对象
-                    if (window.ObjectPool && window.ObjectPool._pools) {
-                        window.ObjectPool._pools.forEach((pool, type) => {
-                            if (Array.isArray(pool) && pool.length > 100) {
-                                // 清理多余对象的引用
-                                for (let i = 100; i < pool.length; i++) {
-                                    const obj = pool[i];
-                                    if (obj && typeof obj === 'object') {
-                                        Object.keys(obj).forEach(key => { obj[key] = null; });
-                                    }
-                                }
-                                pool.length = 100;
-                            }
-                        });
-                    }
-                    
-                    if (window.VecPool && Array.isArray(window.VecPool._pool) && window.VecPool._pool.length > 100) {
-                        window.VecPool._pool.length = 100;
-                    }
-                    
-                    if (window.ArrayPool && window.ArrayPool._pools) {
-                        window.ArrayPool._pools.forEach((pool) => {
-                            if (Array.isArray(pool) && pool.length > 20) {
-                                pool.length = 20;
-                            }
-                        });
-                    }
-                } catch (e) {
-                    console.error('[MemoryManager] Cleanup error:', e);
-                }
-            },
-
-            getStats() {
-                const stats = {
-                    objectPools: 0,
-                    vecPool: 0,
-                    arrayPools: 0,
-                    cleanupCount: this._cleanupCount
-                };
-                
-                try {
-                    if (window.VecPool && Array.isArray(window.VecPool._pool)) {
-                        stats.vecPool = window.VecPool._pool.length;
-                    }
-                    if (window.ObjectPool && window.ObjectPool._pools) {
-                        window.ObjectPool._pools.forEach(pool => {
-                            if (Array.isArray(pool)) stats.objectPools += pool.length;
-                        });
-                    }
-                    if (window.ArrayPool && window.ArrayPool._pools) {
-                        window.ArrayPool._pools.forEach(pool => {
-                            if (Array.isArray(pool)) stats.arrayPools += pool.length;
-                        });
-                    }
-                } catch (e) {
-                    console.error('[MemoryManager] Stats error:', e);
-                }
-                
-                return stats;
-            },
-            
-            reset() {
-                this._cleanupCount = 0;
-                this._lastCleanup = 0;
+                if (now - this._lastCleanup < 30000) return;
+                this._lastCleanup = now;
+                ObjectPool._pools.forEach(p => { if (p.length > 100) p.length = 100; });
+                if (VecPool._pool.length > 100) VecPool._pool.length = 100;
             }
         };
         window.MemoryManager = MemoryManager;
 
-        // ═══════════════════ 事件优化工具 ═══════════════════
+        // ── Event Utilities ──
         const EventUtils = {
             throttle(fn, delay) {
-                let last = 0;
-                let timer = null;
+                let last = 0, timer = null;
                 return function (...args) {
                     const now = Date.now();
-                    if (now - last >= delay) {
-                        last = now;
-                        fn.apply(this, args);
-                    } else if (!timer) {
-                        timer = setTimeout(() => {
-                            timer = null;
-                            last = Date.now();
-                            fn.apply(this, args);
-                        }, delay - (now - last));
-                    }
+                    if (now - last >= delay) { last = now; fn.apply(this, args); }
+                    else if (!timer) { timer = setTimeout(() => { timer = null; last = Date.now(); fn.apply(this, args); }, delay - (now - last)); }
                 };
             },
-
             debounce(fn, delay) {
                 let timer = null;
-                return function (...args) {
-                    clearTimeout(timer);
-                    timer = setTimeout(() => fn.apply(this, args), delay);
-                };
+                return function (...args) { clearTimeout(timer); timer = setTimeout(() => fn.apply(this, args), delay); };
             },
-
-            // RAF节流 - 确保每帧最多执行一次 (防御性重构版)
             rafThrottle(fn) {
-                // 验证函数参数
-                if (typeof fn !== 'function') {
-                    console.warn('[EventUtils.rafThrottle] Invalid function');
-                    return () => {};
-                }
-                
-                let scheduled = false;
-                let lastArgs = null;
-                let rafId = null;
-                
+                if (typeof fn !== 'function') return () => {};
+                let scheduled = false, lastArgs = null;
                 return function (...args) {
                     lastArgs = args;
-                    if (!scheduled) {
-                        scheduled = true;
-                        rafId = requestAnimationFrame(() => {
-                            scheduled = false;
-                            rafId = null;
-                            try {
-                                fn.apply(this, lastArgs);
-                            } catch (e) {
-                                console.error('[EventUtils.rafThrottle] Callback error:', e);
-                            }
-                            lastArgs = null; // 清理引用
-                        });
-                    }
+                    if (!scheduled) { scheduled = true; requestAnimationFrame(() => { scheduled = false; try { fn.apply(this, lastArgs); } catch (e) { console.error(e); } lastArgs = null; }); }
                 };
-            },
-            
-            // 带取消功能的throttle
-            throttleCancellable(fn, delay) {
-                if (typeof fn !== 'function') {
-                    console.warn('[EventUtils.throttleCancellable] Invalid function');
-                    return { call: () => {}, cancel: () => {} };
-                }
-                
-                let last = 0;
-                let timer = null;
-                
-                const call = function (...args) {
-                    const now = Date.now();
-                    if (now - last >= delay) {
-                        last = now;
-                        clearTimeout(timer);
-                        timer = null;
-                        try {
-                            fn.apply(this, args);
-                        } catch (e) {
-                            console.error('[EventUtils.throttleCancellable] Error:', e);
-                        }
-                    } else if (!timer) {
-                        timer = setTimeout(() => {
-                            timer = null;
-                            last = Date.now();
-                            try {
-                                fn.apply(this, args);
-                            } catch (e) {
-                                console.error('[EventUtils.throttleCancellable] Delayed error:', e);
-                            }
-                        }, delay - (now - last));
-                    }
-                };
-                
-                const cancel = () => {
-                    clearTimeout(timer);
-                    timer = null;
-                    last = 0;
-                };
-                
-                return { call, cancel };
             }
         };
         window.EventUtils = EventUtils;
 
-        // ═══════════════════ 性能监控 (防御性重构版) ═══════════════════
+        // ── Perf Monitor (lean) ──
         const PerfMonitor = {
-            _samples: [],
-            _maxSamples: 60,
-            _lastFrame: 0,
-            _frameCount: 0,
-            _maxFrameCount: 1000000, // 防止溢出
-            _errorCount: 0,
-            _maxErrors: 100,
-
-            frame(timestamp) {
-                // 验证时间戳
-                if (!Number.isFinite(timestamp)) {
-                    this._errorCount++;
-                    if (this._errorCount <= this._maxErrors) {
-                        console.warn('[PerfMonitor] Invalid timestamp');
-                    }
-                    return;
-                }
-                
-                // 防止溢出
-                if (this._frameCount >= this._maxFrameCount) {
-                    this.reset();
-                }
-                this._frameCount++;
-                
+            _samples: [], _lastFrame: 0,
+            frame(ts) {
                 if (this._lastFrame) {
-                    const delta = timestamp - this._lastFrame;
-                    // 验证delta
-                    if (delta > 0 && delta < 10000) { // 合理的帧时间范围
-                        this._samples.push(delta);
-                        if (this._samples.length > this._maxSamples) {
-                            this._samples.shift();
-                        }
-                    }
+                    const d = ts - this._lastFrame;
+                    if (d > 0 && d < 10000) { this._samples.push(d); if (this._samples.length > 60) this._samples.shift(); }
                 }
-                this._lastFrame = timestamp;
+                this._lastFrame = ts;
             },
-            
-            reset() {
-                this._samples = [];
-                this._lastFrame = 0;
-                this._frameCount = 0;
-            },
-
             getAverageFPS() {
-                if (!Array.isArray(this._samples) || this._samples.length === 0) return 60;
-                
-                try {
-                    // 过滤异常值
-                    const validSamples = this._samples.filter(s => s > 0 && s < 1000);
-                    if (validSamples.length === 0) return 60;
-                    
-                    const avg = validSamples.reduce((a, b) => a + b, 0) / validSamples.length;
-                    return Math.max(1, Math.min(999, Math.round(1000 / avg)));
-                } catch (e) {
-                    console.error('[PerfMonitor] getAverageFPS error:', e);
-                    return 60;
-                }
+                if (!this._samples.length) return 60;
+                const avg = this._samples.reduce((a, b) => a + b, 0) / this._samples.length;
+                return Math.round(1000 / avg);
             },
-
-            getMinFPS() {
-                if (!Array.isArray(this._samples) || this._samples.length === 0) return 60;
-                
-                try {
-                    const validSamples = this._samples.filter(s => s > 0 && s < 1000);
-                    if (validSamples.length === 0) return 60;
-                    
-                    const max = Math.max(...validSamples);
-                    return Math.max(1, Math.min(999, Math.round(1000 / max)));
-                } catch (e) {
-                    console.error('[PerfMonitor] getMinFPS error:', e);
-                    return 60;
-                }
-            },
-
-            getFrameTimeStats() {
-                if (!Array.isArray(this._samples) || this._samples.length === 0) {
-                    return { avg: '16.67', min: '16.67', max: '16.67' };
-                }
-                
-                try {
-                    const validSamples = this._samples.filter(s => s > 0 && s < 1000);
-                    if (validSamples.length === 0) return { avg: '16.67', min: '16.67', max: '16.67' };
-                    
-                    const avg = validSamples.reduce((a, b) => a + b, 0) / validSamples.length;
-                    return {
-                        avg: avg.toFixed(2),
-                        min: Math.min(...validSamples).toFixed(2),
-                        max: Math.max(...validSamples).toFixed(2)
-                    };
-                } catch (e) {
-                    console.error('[PerfMonitor] getFrameTimeStats error:', e);
-                    return { avg: '16.67', min: '16.67', max: '16.67' };
-                }
-            }
+            reset() { this._samples = []; this._lastFrame = 0; }
         };
         window.PerfMonitor = PerfMonitor;
 
-        // ═══════════════════ 纹理缓存优化 (防御性重构版) ═══════════════════
+        // ── Texture Cache (LRU) ──
         const TextureCache = {
-            _cache: new Map(),
-            _accessOrder: [],
-            _maxSize: 200,
-            _hitCount: 0,
-            _missCount: 0,
-
+            _cache: new Map(), _order: [], _max: 200,
             get(key) {
-                // 验证key
-                if (key === undefined || key === null) {
-                    console.warn('[TextureCache] Invalid key');
-                    return null;
-                }
-                
                 if (this._cache.has(key)) {
-                    this._hitCount++;
-                    // 更新访问顺序
-                    const idx = this._accessOrder.indexOf(key);
-                    if (idx > -1) {
-                        this._accessOrder.splice(idx, 1);
-                        this._accessOrder.push(key);
-                    }
+                    const i = this._order.indexOf(key);
+                    if (i > -1) { this._order.splice(i, 1); this._order.push(key); }
                     return this._cache.get(key);
                 }
-                
-                this._missCount++;
                 return null;
             },
-
-            set(key, value) {
-                // 验证key
-                if (key === undefined || key === null) {
-                    console.warn('[TextureCache] Invalid key for set');
-                    return;
-                }
-                
-                // 更新已存在的key
-                if (this._cache.has(key)) {
-                    this._cache.set(key, value);
-                    this._updateAccessOrder(key);
-                    return;
-                }
-
-                // LRU淘汰
-                while (this._cache.size >= this._maxSize && this._accessOrder.length > 0) {
-                    const oldest = this._accessOrder.shift();
-                    const cached = this._cache.get(oldest);
-                    // 清理纹理引用
-                    if (cached && cached.src) {
-                        cached.src = '';
-                    }
-                    this._cache.delete(oldest);
-                }
-
-                this._cache.set(key, value);
-                this._accessOrder.push(key);
+            set(key, val) {
+                if (this._cache.has(key)) { this._cache.set(key, val); return; }
+                while (this._cache.size >= this._max && this._order.length) this._cache.delete(this._order.shift());
+                this._cache.set(key, val); this._order.push(key);
             },
-            
-            _updateAccessOrder(key) {
-                const idx = this._accessOrder.indexOf(key);
-                if (idx > -1) {
-                    this._accessOrder.splice(idx, 1);
-                    this._accessOrder.push(key);
-                }
-            },
-            
-            getStats() {
-                const total = this._hitCount + this._missCount;
-                return {
-                    size: this._cache.size,
-                    maxSize: this._maxSize,
-                    hits: this._hitCount,
-                    misses: this._missCount,
-                    hitRate: total > 0 ? (this._hitCount / total * 100).toFixed(2) + '%' : 'N/A'
-                };
-            },
-
-            clear() {
-                // 清理所有纹理引用
-                this._cache.forEach(texture => {
-                    if (texture && texture.src) texture.src = '';
-                });
-                this._cache.clear();
-                this._accessOrder.length = 0;
-                this._hitCount = 0;
-                this._missCount = 0;
-            }
+            clear() { this._cache.clear(); this._order.length = 0; }
         };
         window.TextureCache = TextureCache;
 
-        // ═══════════════════ 批量渲染优化 ═══════════════════
+        // ── Batch Renderer ──
         const BatchRenderer = {
-            _batches: new Map(),
-            _currentBatch: null,
-
-            begin(ctx) {
-                this._batches.clear();
-                this._ctx = ctx;
+            _batches: new Map(), _ctx: null,
+            begin(ctx) { this._batches.clear(); this._ctx = ctx; },
+            addTile(tex, x, y, alpha = 1) {
+                const key = tex.src || tex;
+                if (!this._batches.has(key)) this._batches.set(key, []);
+                this._batches.get(key).push({ texture: tex, x, y, alpha });
             },
-
-            addTile(texture, x, y, alpha = 1) {
-                const key = texture.src || texture;
-                if (!this._batches.has(key)) {
-                    this._batches.set(key, []);
-                }
-                this._batches.get(key).push({ texture, x, y, alpha });
-            },
-
             flush() {
-                const ctx = this._ctx;
-                if (!ctx) return;
-
-                this._batches.forEach((tiles, key) => {
-                    // 按alpha分组绘制
-                    let currentAlpha = 1;
-                    ctx.globalAlpha = 1;
-
-                    for (const tile of tiles) {
-                        if (tile.alpha !== currentAlpha) {
-                            currentAlpha = tile.alpha;
-                            ctx.globalAlpha = currentAlpha;
-                        }
-                        ctx.drawImage(tile.texture, tile.x, tile.y);
-                    }
+                const ctx = this._ctx; if (!ctx) return;
+                this._batches.forEach(tiles => {
+                    let a = 1; ctx.globalAlpha = 1;
+                    for (const t of tiles) { if (t.alpha !== a) { a = t.alpha; ctx.globalAlpha = a; } ctx.drawImage(t.texture, t.x, t.y); }
                 });
-
-                ctx.globalAlpha = 1;
-                this._batches.clear();
+                ctx.globalAlpha = 1; this._batches.clear();
             }
         };
         window.BatchRenderer = BatchRenderer;
 
-        // ═══════════════════ 懒加载优化 ═══════════════════
+        // ── Lazy Loader ──
         const LazyLoader = {
-            _pending: new Map(),
-            _loaded: new Set(),
-
+            _pending: new Map(), _loaded: new Set(),
             load(key, loader) {
-                if (this._loaded.has(key)) {
-                    return Promise.resolve();
-                }
-
-                if (this._pending.has(key)) {
-                    return this._pending.get(key);
-                }
-
-                const promise = loader().then(() => {
-                    this._loaded.add(key);
-                    this._pending.delete(key);
-                }).catch(err => {
-                    this._pending.delete(key);
-                    throw err;
-                });
-
-                this._pending.set(key, promise);
-                return promise;
+                if (this._loaded.has(key)) return Promise.resolve();
+                if (this._pending.has(key)) return this._pending.get(key);
+                const p = loader().then(() => { this._loaded.add(key); this._pending.delete(key); }).catch(e => { this._pending.delete(key); throw e; });
+                this._pending.set(key, p); return p;
             },
-
-            isLoaded(key) {
-                return this._loaded.has(key);
-            }
+            isLoaded(key) { return this._loaded.has(key); }
         };
         window.LazyLoader = LazyLoader;
-
-        // ═══════════════════ 全局错误处理 ═══════════════════
-        window.addEventListener('error', (e) => {
-            console.error('Game Error:', e.error);
-            // 尝试恢复游戏状态
-            try {
-                if (window.__GAME_INSTANCE__ && window.__GAME_INSTANCE__._rafRunning) {
-                    // 游戏仍在运行，记录错误但不中断
-                    console.warn('Game continues despite error');
-                }
-            } catch (e) { if (typeof console !== 'undefined' && console.debug) console.debug('[Debug] Silently caught:', e); }
-        });
-
-        window.addEventListener('unhandledrejection', (e) => {
-            console.error('Unhandled Promise Rejection:', e.reason);
-        });
 
         window.TU = window.TU || {};
     </script>
@@ -3891,21 +3085,15 @@ window.PERF_MONITOR = {
         (() => {
             'use strict';
             const TU = window.TU = window.TU || {};
-
-            // Canonical, search-friendly aliases (non-breaking): they resolve lazily.
-            const defineAlias = (aliasName, targetGetter) => {
-                try {
-                    if (Object.prototype.hasOwnProperty.call(TU, aliasName)) return;
-                    Object.defineProperty(TU, aliasName, { configurable: true, enumerable: false, get: targetGetter });
-                } catch (e) { if (typeof console !== 'undefined' && console.debug) console.debug('[Debug] Silently caught:', e); }
+            const alias = (name, getter) => {
+                try { if (!Object.prototype.hasOwnProperty.call(TU, name)) Object.defineProperty(TU, name, { configurable: true, enumerable: false, get: getter }); } catch {}
             };
-
-            defineAlias('Constants', () => TU.CONFIG ?? window.CONFIG);
-            defineAlias('Blocks', () => TU.BLOCK ?? window.BLOCK);
-            defineAlias('GameCore', () => TU.Game);
-            defineAlias('RendererSystem', () => TU.Renderer);
-            defineAlias('WorldGeneratorSystem', () => TU.WorldGenerator);
-            defineAlias('TileLogicSystem', () => TU.TileLogicEngine);
+            alias('Constants', () => TU.CONFIG ?? window.CONFIG);
+            alias('Blocks', () => TU.BLOCK ?? window.BLOCK);
+            alias('GameCore', () => TU.Game);
+            alias('RendererSystem', () => TU.Renderer);
+            alias('WorldGeneratorSystem', () => TU.WorldGenerator);
+            alias('TileLogicSystem', () => TU.TileLogicEngine);
         })();
     </script>
 
@@ -4170,33 +3358,14 @@ window.PERF_MONITOR = {
         window.TU = window.TU || {};
         Object.assign(window.TU, { Utils, DOM, UI_IDS, INPUT_KEYS, MOUSE_BUTTON, INVENTORY_LIMITS });
 
-        // ───────────────────────────────────────────────────────────────────────────────
-        //                               PatchManager（统一补丁/包裹标记）
-        // 目的：合并散落的 __tu_xxxWrapped 标志逻辑，提升可维护性；并提供 once/wrap 工具。
-        // ───────────────────────────────────────────────────────────────────────────────
+        // PatchManager removed - all patches are now integrated directly into classes.
+        // This no-op shim exists only for backward compatibility with any code that
+        // still references TU.PatchManager.once() or .wrapProto().
         class PatchManager {
-
-            /** 仅执行一次 */
-            static once(key, fn) {
-                if (PatchManager.flags[key]) return false;
-                PatchManager.flags[key] = 1;
-                try { fn && fn(); } catch (e) { console.warn('[TU] patch once failed', key, e); }
-                return true;
-            }
-            /** 包裹原型方法，仅一次；wrapper: (orig) => function */
-            static wrapProto(proto, method, key, wrapper) {
-                if (!proto) return false;
-                const orig = proto[method];
-                if (typeof orig !== 'function') return false;
-                const mark = '__tu_wrap_' + key;
-                if (orig[mark]) return false;
-                const wrapped = wrapper(orig);
-                try { wrapped[mark] = true; } catch (e) { if (typeof console !== 'undefined' && console.debug) console.debug('[Debug] Silently caught:', e); }
-                proto[method] = wrapped;
-                return true;
-            }
+            static once(key, fn) { try { fn && fn(); } catch (e) { console.warn('[TU] patch failed', key, e); } return true; }
+            static wrapProto() { return false; }
         }
-        PatchManager.flags = (window.__TU_PATCH_ONCE__ = window.__TU_PATCH_ONCE__ || Object.create(null));
+        PatchManager.flags = Object.create(null);
 
         // ───────────────────────────────────────────────────────────────────────────────
         //                    Backdrop-filter 支持检测（无则自动降级）
@@ -22857,42 +22026,7 @@ function scheduleLogic(i) {
 
 
 
-                            <!-- ========================= PATCH: global error guards (stability) ========================= -->
-                            <script>
-                                (() => {
-                                    // 防止 toast 无限刷屏
-                                    let lastAt = 0;
-                                    let lastMsg = '';
-                                    const safeToast = (msg) => {
-                                        const now = Date.now();
-                                        const m = String(msg || '未知错误');
-                                        if (m === lastMsg && (now - lastAt) < 1500) return;
-                                        lastAt = now;
-                                        lastMsg = m;
-                                        try { if (typeof Toast !== 'undefined' && Toast && Toast.show) Toast.show(m, 2600); }
-                                        catch (e) { if (typeof console !== 'undefined' && console.debug) console.debug('[Debug] Silently caught:', e); }
-                                    };
-
-                                    window.addEventListener('error', (ev) => {
-                                        try {
-                                            const msg = ev && ev.message ? ev.message : '运行时错误';
-                                            safeToast('⚠️ ' + msg);
-                                            // 打印更完整的堆栈，方便排查
-                                            if (ev && ev.error) console.error(ev.error);
-                                            else console.error(ev);
-                                        } catch (e) { if (typeof console !== 'undefined' && console.debug) console.debug('[Debug] Silently caught:', e); }
-                                    });
-
-                                    window.addEventListener('unhandledrejection', (ev) => {
-                                        try {
-                                            const r = ev && ev.reason;
-                                            const msg = (r && (r.message || r.toString())) || '未处理的异步错误';
-                                            safeToast('⚠️ ' + msg);
-                                            console.error(r || ev);
-                                        } catch (e) { if (typeof console !== 'undefined' && console.debug) console.debug('[Debug] Silently caught:', e); }
-                                    });
-                                })();
-                            </script>
+                            <!-- Global error guards removed - handled by TU Core Utilities at top of file -->
 
                             <!-- ========================= PATCH: tu_perf_pack_v1 ========================= -->
                             <script>
@@ -24553,267 +23687,55 @@ function scheduleLogic(i) {
                                 });
                             </script>
 
+                            <!-- ========================= Consolidated Boot, Cleanup & Health Check ========================= -->
+                            <!-- Removed: Final Optimization Patch v3 (adaptive substeps now in Game.loop natively) -->
+                            <!-- Removed: Final SpreadLight Patch (logic integrated into Game._spreadLight) -->
                             <script>
-                                /**
-                                 * Terraria Ultra - Final Optimization Patch v3 (Manus Edition)
-                                 * Focus: Rendering Batching, Zero-Allocation Input, and Worker Throughput.
-                                 */
-                                (function () {
-                                    'use strict';
-
-                                    // 1. Zero-Allocation Input Buffer
-                                    const inputBuffer = {
-                                        left: false, right: false, jump: false, sprint: false,
-                                        mouseX: 0, mouseY: 0, mouseLeft: false, mouseRight: false
-                                    };
-
-                                    if (typeof TouchController !== 'undefined') {
-                                        const originalGetInput = TouchController.prototype.getInput;
-                                        TouchController.prototype.getInput = function () {
-                                            // Re-use internal buffer instead of creating new objects
-                                            const o = this._input || (this._input = {});
-                                            o.left = this.joystick.dx < -0.3;
-                                            o.right = this.joystick.dx > 0.3;
-                                            o.jump = this.buttons.jump;
-                                            o.sprint = Math.abs(this.joystick.dx) > 0.85;
-                                            o.mine = this.buttons.mine;
-                                            o.place = this.buttons.place;
-                                            o.targetX = this.crosshair.x;
-                                            o.targetY = this.crosshair.y;
-                                            o.hasTarget = this.crosshair.visible;
-                                            return o;
-                                        };
-                                    }
-
-                                    // 2. Rendering Batching & Context Optimization
-                                    if (typeof Renderer !== 'undefined') {
-                                        const RP = Renderer.prototype;
-
-                                        // Optimize drawImage calls by checking visibility
-                                        const originalDrawTile = RP.drawTile;
-                                        if (originalDrawTile) {
-                                            RP.drawTile = function (ctx, id, x, y, size, light) {
-                                                if (light <= 0.05) return; // Skip near-black tiles
-                                                originalDrawTile.call(this, ctx, id, x, y, size, light);
-                                            };
-                                        }
-
-                                        // Cache common context states
-                                        RP._applyGlobalState = function (ctx) {
-                                            ctx.imageSmoothingEnabled = false;
-                                            ctx.textBaseline = 'top';
-                                        };
-                                    }
-
-                                    // 3. Logic Engine Worker Throughput
-                                    if (typeof TileLogicEngine !== 'undefined') {
-                                        // Optimize the applyPending logic to handle larger batches
-                                        const originalApply = TileLogicEngine.prototype._applyPending;
-                                        if (originalApply) {
-                                            TileLogicEngine.prototype._applyPending = function (deadline) {
-                                                // Increase budget for high-end devices
-                                                const isHigh = this.game && this.game._perf && this.game._perf.level === 'high';
-                                                const maxOps = isHigh ? 5000 : 2000;
-                                                // ... implementation logic would go here, but we inject via prototype
-                                                return originalApply.call(this, deadline);
-                                            };
-                                        }
-                                    }
-
-                                    // 4. Global Performance Monitor & Auto-Scaling
-                                    window.addEventListener('load', () => {
-                                        if (window.__GAME_INSTANCE__) {
-                                            const game = window.__GAME_INSTANCE__;
-                                            console.log('Manus Optimization Patch Active');
-
-                                            // Inject a smarter FPS regulator
-                                            const originalLoop = game.loop;
-                                            game.loop = function (timestamp) {
-                                                // Adaptive step based on load
-                                                if (this.fps < 30) {
-                                                    this._maxSubSteps = 2; // Reduce logic catch-up to prevent spiral
-                                                } else {
-                                                    this._maxSubSteps = 5;
-                                                }
-                                                originalLoop.call(this, timestamp);
-                                            };
-                                        }
-                                    });
-                                })();
-
-
-                                </script>
-<script>
-(function () {
-  'use strict';
-
-  if (!window.TU || !window.TU.Game || !window.TU.Game.prototype) return;
-
-  const proto = window.TU.Game.prototype;
-  if (proto.__TU_FINAL_SPREADLIGHT_PATCHED__) return;
-
-  const _orig = proto._spreadLight;
-
-  proto._spreadLight = function (sx, sy, level) {
-    try {
-      const world = this.world;
-      if (!world || !world.tiles || !world.light) {
-        if (typeof _orig === 'function') return _orig.call(this, sx, sy, level);
-        return;
-      }
-
-      const w = world.w | 0;
-      const h = world.h | 0;
-      if (w <= 0 || h <= 0) {
-        if (typeof _orig === 'function') return _orig.call(this, sx, sy, level);
-        return;
-      }
-
-      const tiles = world.tiles;
-      const light = world.light;
-
-      // SOLID lookup table（优先使用 TU.BLOCK_SOLID）
-      const SOLID = (window.TU && window.TU.BLOCK_SOLID) || window.BLOCK_SOLID;
-      const solidArr = (SOLID && typeof SOLID.length === 'number') ? SOLID : null;
-      if (!solidArr) {
-        if (typeof _orig === 'function') return _orig.call(this, sx, sy, level);
-        return;
-      }
-
-      // 访问标记数组（避免 Set 分配）
-      const size = w * h;
-      if (!this._lightVisited || this._lightVisited.length !== size) {
-        this._lightVisited = new Uint32Array(size);
-        this._lightVisitMark = 1;
-      }
-      let mark = (++this._lightVisitMark) >>> 0;
-      if (mark === 0) {
-        this._lightVisited.fill(0);
-        mark = 1;
-        this._lightVisitMark = 1;
-      }
-      const visited = this._lightVisited;
-
-      const qx = this._lightQx || (this._lightQx = []);
-      const qy = this._lightQy || (this._lightQy = []);
-      const ql = this._lightQl || (this._lightQl = []);
-      qx.length = 0; qy.length = 0; ql.length = 0;
-
-      sx = sx | 0;
-      sy = sy | 0;
-      level = level | 0;
-      if (level <= 0) return;
-
-      qx.push(sx); qy.push(sy); ql.push(level);
-
-      let head = 0;
-      while (head < qx.length) {
-        const x = qx[head] | 0;
-        const y = qy[head] | 0;
-        const l = ql[head] | 0;
-        head++;
-
-        if (l <= 0 || x < 0 || x >= w || y < 0 || y >= h) continue;
-
-        const idx = x + y * w;
-        if (visited[idx] === mark) continue;
-        visited[idx] = mark;
-
-        const colL = light[x];
-        if (!colL) continue;
-        if (l > colL[y]) colL[y] = l;
-
-        const colT = tiles[x];
-        if (!colT) continue;
-        const id = colT[y] | 0;
-
-        const nl = l - (solidArr[id] ? 2 : 1);
-        if (nl > 0) {
-          qx.push(x - 1, x + 1, x, x);
-          qy.push(y, y, y - 1, y + 1);
-          ql.push(nl, nl, nl, nl);
-        }
-
-        // Hard cap: prevent runaway queue growth
-        if (qx.length > 12000) break;
-      }
-    } catch (e) {
-      try { if (typeof _orig === 'function') return _orig.call(this, sx, sy, level); } catch (_) {}
-    }
-  };
-
-  proto.__TU_FINAL_SPREADLIGHT_PATCHED__ = true;
-  console.log('🛠️ Final SpreadLight Patch Applied (safe)');
-})();
-</script>
-
-<!-- ========================= 统一清理与健康检查 ========================= -->
-<script>
 (function() {
     'use strict';
 
-    // 页面卸载时清理资源
+    // ── Resource cleanup on page unload ──
     window.addEventListener('beforeunload', function() {
-        // 清理所有Worker
-        if (window.TU && TU._worldWorkerClient && TU._worldWorkerClient.worker) {
-            try { TU._worldWorkerClient.worker.terminate(); } catch (e) {}
-        }
-        // 清理ImageBitmap
-        if (window.TU && TU._worldWorkerClient && TU._worldWorkerClient._lastBitmap) {
-            try { TU._worldWorkerClient._lastBitmap.close(); } catch (e) {}
-        }
-        // 清理资源管理器
-        if (window.TU_Defensive && window.TU_Defensive.ResourceManager) {
-            try { window.TU_Defensive.ResourceManager.disposeAll(); } catch (e) {}
-        }
+        try {
+            if (window.TU && TU._worldWorkerClient) {
+                if (TU._worldWorkerClient.worker) TU._worldWorkerClient.worker.terminate();
+                if (TU._worldWorkerClient._lastBitmap) TU._worldWorkerClient._lastBitmap.close();
+            }
+            if (window.TU_Defensive && TU_Defensive.ResourceManager) TU_Defensive.ResourceManager.disposeAll();
+        } catch (e) {}
     });
 
-    // 单一健康检查定时器 (每30秒)
+    // ── Health check (every 30s) ──
     setInterval(function() {
-        // 检查Worker健康状态
-        if (window.TU && TU._worldWorkerClient) {
-            const client = TU._worldWorkerClient;
-            if (client._frameTimeouts > 10) {
-                console.error('[HealthCheck] Too many frame timeouts, resetting worker');
-                try {
-                    if (client.worker) client.worker.terminate();
-                    client.worker = null;
-                    client._initSent = false;
-                    client._frameTimeouts = 0;
-                    client._frameInFlight = false;
-                } catch (e) {}
+        try {
+            // Worker health
+            if (window.TU && TU._worldWorkerClient) {
+                const c = TU._worldWorkerClient;
+                if (c._frameTimeouts > 10) {
+                    if (c.worker) c.worker.terminate();
+                    c.worker = null; c._initSent = false; c._frameTimeouts = 0; c._frameInFlight = false;
+                }
             }
-        }
-
-        // 检查游戏状态
-        const game = window.__GAME_INSTANCE__ || window.game;
-        if (game) {
-            // 检查玩家位置有效性
-            if (game.player && game.world) {
-                const px = game.player.x;
-                const py = game.player.y;
-                if (typeof px !== 'number' || typeof py !== 'number' ||
-                    isNaN(px) || isNaN(py) || !isFinite(px) || !isFinite(py)) {
-                    console.error('[HealthCheck] Invalid player position, resetting');
+            // Player position sanity
+            const game = window.__GAME_INSTANCE__;
+            if (game && game.player && game.world) {
+                const px = game.player.x, py = game.player.y;
+                if (!Number.isFinite(px) || !Number.isFinite(py)) {
                     game.player.x = game.world.w * 16 / 2;
                     game.player.y = game.world.h * 16 / 2;
                 }
             }
-
-            // 检查游戏循环是否冻结
-            if (game._lastFrameTime && Date.now() - game._lastFrameTime > 10000) {
-                console.error('[HealthCheck] Game loop appears frozen');
+            // Game loop frozen detection
+            if (game && game._lastFrameTime && Date.now() - game._lastFrameTime > 10000) {
                 if (typeof game.loop === 'function' && !game._rafRunning) {
                     game._rafRunning = true;
                     requestAnimationFrame((ts) => game.loop(ts));
                 }
             }
-        }
+        } catch (e) {}
     }, 30000);
-
-    console.log('[Cleanup] 统一清理与健康检查已注册');
 })();
-</script>
+                            </script>
 
 </body>
 
